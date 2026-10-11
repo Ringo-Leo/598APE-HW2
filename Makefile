@@ -1,5 +1,5 @@
 CXX := clang++
-CXXFLAGS := -O2 -std=c++17 -Wall -Wextra -I include -I.
+CXXFLAGS := -g -O2 -std=c++17 -Wall -Wextra -I include -I.
 
 # Directories
 SRC_DIR := src
