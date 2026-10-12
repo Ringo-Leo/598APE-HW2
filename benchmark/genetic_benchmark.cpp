@@ -294,7 +294,7 @@ void run_symbolic_regression(const std::string &dataset_file) {
   //             << std::endl;
   // }
 
-  // Predict on top 2 candidates
+  // TODO: Predict on top 2 candidates
   insertionSortPrograms(final_programs, params.population_size);
 
   std::vector<float> y_pred1(X_test.size());
@@ -439,7 +439,7 @@ void run_symbolic_classification(const std::string &dataset_file) {
   //             << std::endl;
   // }
 
-  // Predict classes for best 2 programs acc to training
+  //TODO: Predict classes for best 2 programs acc to training
   insertionSortPrograms(final_programs, params.population_size);
   std::vector<float> y_pred1(X_test.size());
   genetic::symClfPredict(X_test_flat.data(), X_test.size(), params,
@@ -595,6 +595,7 @@ void run_symbolic_reconstruction(const std::string &png_file, int K) {
       genetic::symFit(X_train_flat.data(), y_train.data(),
                       sample_weights.data(), X_train.size(),
                       params.num_features, params, final_programs, history);
+      //TODO: Predict on top 1 candidates
       insertionSortPrograms(final_programs, params.population_size);
       genetic::program_t best_program = &final_programs[0];
 
