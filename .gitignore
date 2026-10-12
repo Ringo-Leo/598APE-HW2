@@ -34,6 +34,4 @@
 compile_commands.json
 .cache/
 genetic_benchmark
-
-silk.rkt
-square.rkt
+perf/

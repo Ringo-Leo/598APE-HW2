@@ -131,6 +131,7 @@ void cpp_evolve(const std::vector<program> &h_oldprogs,
       } else if (prob < mut_probs[3]) {
         h_nextprogs[i].mut_type = mutation_t::point;
       } else {
+        //TODO: cache the parent fitness and avoid computing it again
         h_nextprogs[i].mut_type = mutation_t::reproduce;
       }
     }
