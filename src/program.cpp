@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <fitness.h>
+#include <limits>
 #include <node.h>
 #include <numeric>
 #include <program.h>
@@ -52,6 +53,68 @@ void execute_kernel(const program_t d_progs, const float *data, float *y_pred,
   }
 }
 
+template <int MaxSize = MAX_STACK_SIZE>
+void execute_kernel_and_score(const program_t d_progs, const float *data,
+                              float *y_pred, const uint64_t n_rows,
+                              const uint64_t n_progs, metric_t metric,
+                              const float *y, const float *w, float *score) {
+  float WS = std::numeric_limits<float>::min();
+  auto initWS = [&]() {
+    if (WS == std::numeric_limits<float>::min()) {
+      WS = 0;
+      for (uint64_t i = 0; i < n_rows; ++i) {
+        WS += w[i];
+      }
+    }
+  };
+  for (uint64_t pid = 0; pid < n_progs; ++pid) {
+    program_t curr_p = d_progs + pid; // Current program
+    for (uint64_t row_id = 0; row_id < n_rows; ++row_id) {
+
+      stack<float, MaxSize> eval_stack;
+
+      int end = curr_p->len - 1;
+      node *curr_node = curr_p->nodes + end;
+
+      float res = 0.0f;
+      float in[2] = {0.0f, 0.0f};
+
+      while (end >= 0) {
+        if (detail::is_nonterminal(curr_node->t)) {
+          int ar = detail::arity(curr_node->t);
+          in[0] = eval_stack.pop(); // Min arity of function is 1
+          if (ar > 1)
+            in[1] = eval_stack.pop();
+        }
+        res = detail::evaluate_node(*curr_node, data, n_rows, row_id, in);
+        eval_stack.push(res);
+        curr_node--;
+        end--;
+      }
+
+      // Outputs stored in col-major format
+      y_pred[row_id] = eval_stack.pop();
+    }
+    if (metric == metric_t::pearson) {
+      weightedPearson(n_rows, 1, y, y_pred, w, &score[pid]);
+    } else if (metric == metric_t::spearman) {
+      weightedSpearman(n_rows, 1, y, y_pred, w, &score[pid]);
+    } else if (metric == metric_t::mae) {
+      meanAbsoluteError(n_rows, 1, y, y_pred, w, &score[pid]);
+    } else if (metric == metric_t::mse) {
+      initWS();
+      meanSquareError(n_rows, 1, y, y_pred, w, &score[pid], WS);
+    } else if (metric == metric_t::rmse) {
+      initWS();
+      rootMeanSquareError(n_rows, 1, y, y_pred, w, &score[pid], WS);
+    } else if (metric == metric_t::logloss) {
+      logLoss(n_rows, 1, y, y_pred, w, &score[pid]);
+    } else {
+      // This should not be reachable
+    }
+  }
+}
+
 program::program()
     : len(0), depth(0), raw_fitness_(0.0f), metric(metric_t::mse),
       mut_type(mutation_t::none), nodes(nullptr) {}
@@ -83,6 +146,15 @@ program &program::operator=(const program &src) {
 void compute_metric(int n_rows, int n_progs, const float *y,
                     const float *y_pred, const float *w, float *score,
                     const param &params) {
+  float WS = std::numeric_limits<float>::min();
+  auto initWS = [&]() {
+    if (WS == std::numeric_limits<float>::min()) {
+      WS = 0;
+      for (uint64_t i = 0; i < n_rows; ++i) {
+        WS += w[i];
+      }
+    }
+  };
   // Call appropriate metric function based on metric defined in params
   if (params.metric == metric_t::pearson) {
     weightedPearson(n_rows, n_progs, y, y_pred, w, score);
@@ -91,9 +163,11 @@ void compute_metric(int n_rows, int n_progs, const float *y,
   } else if (params.metric == metric_t::mae) {
     meanAbsoluteError(n_rows, n_progs, y, y_pred, w, score);
   } else if (params.metric == metric_t::mse) {
-    meanSquareError(n_rows, n_progs, y, y_pred, w, score);
+    initWS();
+    meanSquareError(n_rows, n_progs, y, y_pred, w, score, WS);
   } else if (params.metric == metric_t::rmse) {
-    rootMeanSquareError(n_rows, n_progs, y, y_pred, w, score);
+    initWS();
+    rootMeanSquareError(n_rows, n_progs, y, y_pred, w, score, WS);
   } else if (params.metric == metric_t::logloss) {
     logLoss(n_rows, n_progs, y, y_pred, w, score);
   } else {
@@ -124,12 +198,10 @@ void find_batched_fitness(int n_progs, program_t d_progs, float *score,
                           const float *data, const float *y,
                           const float *sample_weights) {
 
-  std::vector<float> y_pred((uint64_t)n_rows * (uint64_t)n_progs);
-  execute(d_progs, n_rows, n_progs, data, y_pred.data());
-
-  // Compute error
-  compute_metric(n_rows, n_progs, y, y_pred.data(), sample_weights, score,
-                 params);
+  std::vector<float> y_pred((uint64_t)n_rows);
+  execute_kernel_and_score(
+      d_progs, data, y_pred.data(), static_cast<uint64_t>(n_rows),
+      static_cast<uint64_t>(n_progs), params.metric, y, sample_weights, score);
 }
 
 void set_fitness(program &h_prog, const param &params, const int n_rows,
