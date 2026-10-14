@@ -439,6 +439,7 @@ void point_mutation(const program &prog, program &p_out, const param &params,
 
   // Mutate nodes
   int len = p_out.len;
+  bool changed = false;
   for (int i = 0; i < len; ++i) {
     node curr(prog.nodes[i]);
 
@@ -463,10 +464,12 @@ void point_mutation(const program &prog, program &p_out, const param &params,
         int choice = dist_fset(rng);
         curr = node(fset[choice]);
       }
-
+      changed |=
+          (curr.t != prog.nodes[i].t || curr.u.fid != prog.nodes[i].u.fid);
       // Update p_out with updated value
       p_out.nodes[i] = curr;
     }
+    p_out.fit_valid = !changed && prog.fit_valid;
   }
 }
 
