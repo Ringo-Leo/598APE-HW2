@@ -43,13 +43,13 @@ static std::vector<uint32_t> make_program_key(const program &prog) {
  * is stored in column major format.
  */
 template <int MaxSize = MAX_STACK_SIZE>
-void execute_kernel(const program_t d_progs, const float *data, float *y_pred,
+void execute_kernel(const program_t *d_progs, const float *data, float *y_pred,
                     const uint64_t n_rows, const uint64_t n_progs) {
   for (uint64_t pid = 0; pid < n_progs; ++pid) {
     for (uint64_t row_id = 0; row_id < n_rows; ++row_id) {
 
       stack<float, MaxSize> eval_stack;
-      program_t curr_p = d_progs + pid; // Current program
+      program_t curr_p = *(d_progs + pid); // Current program
 
       int end = curr_p->len - 1;
       node *curr_node = curr_p->nodes + end;
@@ -198,13 +198,13 @@ void compute_metric(int n_rows, int n_progs, const float *y,
   }
 }
 
-void execute(const program_t &d_progs, const int n_rows, const int n_progs,
+void execute(const program_t *d_progs, const int n_rows, const int n_progs,
              const float *data, float *y_pred) {
   execute_kernel(d_progs, data, y_pred, static_cast<uint64_t>(n_rows),
                  static_cast<uint64_t>(n_progs));
 }
 
-void find_fitness(program_t d_prog, float *score, const param &params,
+void find_fitness(program_t *d_prog, float *score, const param &params,
                   const int n_rows, const float *data, const float *y,
                   const float *sample_weights) {
 
@@ -216,7 +216,7 @@ void find_fitness(program_t d_prog, float *score, const param &params,
   compute_metric(n_rows, 1, y, y_pred.data(), sample_weights, score, params);
 }
 
-void find_batched_fitness(int n_progs, program_t d_progs, float *score,
+void find_batched_fitness(int n_progs, program_t *d_progs, float *score,
                           const param &params, const int n_rows,
                           const float *data, const float *y,
                           const float *sample_weights) {
@@ -232,8 +232,9 @@ void set_fitness(program &h_prog, const param &params, const int n_rows,
                  const float *sample_weights) {
 
   std::vector<float> score(1);
+  program_t p = &h_prog;
 
-  find_fitness(&h_prog, score.data(), params, n_rows, data, y, sample_weights);
+  find_fitness(&p, score.data(), params, n_rows, data, y, sample_weights);
 
   // Update host and device score for program
   h_prog.raw_fitness_ = score[0];
@@ -244,21 +245,22 @@ void set_batched_fitness(int n_progs, std::vector<program> &h_progs,
                          const float *data, const float *y,
                          const float *sample_weights, FitnessCache &cache) {
 
-  std::vector<program> miss_progs;
-  std::vector<int> miss_indices;
-  std::vector<std::vector<uint32_t>> miss_keys;
+  std::unordered_map<std::vector<uint32_t>, int, ProgramKeyHash> working_set;
+  std::vector<program *> miss_progs;
+  std::vector<std::pair<int, int>> miss_keys;
 
   for (int i = 0; i < n_progs; ++i) {
     auto key = make_program_key(h_progs[i]);
-    auto it = cache.find(key);
 
-    if (it != cache.end()) {
+    if (auto it = cache.find(key); it != cache.end()) {
       h_progs[i].raw_fitness_ = it->second;
-    } else {
-      miss_progs.push_back(h_progs[i]);
-      miss_indices.push_back(i);
-      miss_keys.push_back(std::move(key));
+      continue;
     }
+    auto [it, inserted] =
+        working_set.try_emplace(std::move(key), miss_progs.size());
+    if (inserted)
+      miss_progs.push_back(&h_progs[i]);
+    miss_keys.push_back(std::make_pair(i, it->second));
   }
 
   if (miss_progs.empty())
@@ -269,10 +271,10 @@ void set_batched_fitness(int n_progs, std::vector<program> &h_progs,
       static_cast<int>(miss_progs.size()), miss_progs.data(),
       scores.data(), params, n_rows, data, y, sample_weights);
 
-  for (std::size_t j = 0; j < miss_progs.size(); ++j) {
-    h_progs[miss_indices[j]].raw_fitness_ = scores[j];
-    cache.emplace(std::move(miss_keys[j]), scores[j]);
-  }
+  for (auto [i, idx] : miss_keys)
+    h_progs[i].raw_fitness_ = scores[idx];
+  for (auto &[key, idx] : working_set)
+    cache.emplace(key, scores[idx]);
 }
 
 float get_fitness(const program &prog, const param &params) {
