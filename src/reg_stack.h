@@ -38,7 +38,7 @@ template <typename DataT, int MaxSize> struct stack {
    *       behavior.
    */
   void push(DataT val) {
-    if (full())
+    if (full()) [[unlikely]]
       return;
     regs_[elements_++] = val;
   }
