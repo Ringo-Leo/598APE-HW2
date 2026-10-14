@@ -3,6 +3,7 @@
 #include "node_detail.h"
 #include "philox_engine.h"
 #include "reg_stack.h"
+#include "fitness_cache.h"
 #include <algorithm>
 #include <cstdint>
 #include <fitness.h>
@@ -12,9 +13,31 @@
 #include <program.h>
 #include <random>
 #include <stack>
+#include <cstring>
 
 namespace genetic {
 
+static std::vector<uint32_t> make_program_key(const program &prog) {
+  std::vector<uint32_t> key;
+  key.reserve(1 + 2 * static_cast<std::size_t>(prog.len));
+  key.push_back(static_cast<uint32_t>(prog.len));
+
+  for (int i = 0; i < prog.len; ++i){
+    const node &n = prog.nodes[i];
+    key.push_back(static_cast<uint32_t>(n.t));
+
+    if(n.t == node::type::variable){
+      key.push_back(static_cast<uint32_t>(n.u.fid));
+    } else if (n.t == node::type::constant){
+      uint32_t bits;
+      static_assert(sizeof(bits) == sizeof(n.u.val));
+      std::memcpy(&bits, &n.u.val, sizeof(bits));
+      key.push_back(bits);
+    }
+  }
+  
+  return key;
+}
 /**
  * Execution kernel for a single program. We assume that the input data
  * is stored in column major format.
@@ -219,17 +242,36 @@ void set_fitness(program &h_prog, const param &params, const int n_rows,
 void set_batched_fitness(int n_progs, std::vector<program> &h_progs,
                          const param &params, const int n_rows,
                          const float *data, const float *y,
-                         const float *sample_weights) {
+                         const float *sample_weights, FitnessCache &cache) {
 
-  std::vector<float> score(n_progs);
+  std::vector<program> miss_progs;
+  std::vector<int> miss_indices;
+  std::vector<std::vector<uint32_t>> miss_keys;
 
-  find_batched_fitness(n_progs, h_progs.data(), score.data(), params, n_rows,
-                       data, y, sample_weights);
+  for (int i = 0; i < n_progs; ++i) {
+    auto key = make_program_key(h_progs[i]);
+    auto it = cache.find(key);
 
-  // Update scores on host and device
-  // TODO: Find a way to reduce the number of implicit memory transfers
-  for (auto i = 0; i < n_progs; ++i) {
-    h_progs[i].raw_fitness_ = score[i];
+    if (it != cache.end()) {
+      h_progs[i].raw_fitness_ = it->second;
+    } else {
+      miss_progs.push_back(h_progs[i]);
+      miss_indices.push_back(i);
+      miss_keys.push_back(std::move(key));
+    }
+  }
+
+  if (miss_progs.empty())
+    return;
+
+  std::vector<float> scores(miss_progs.size());
+  find_batched_fitness(
+      static_cast<int>(miss_progs.size()), miss_progs.data(),
+      scores.data(), params, n_rows, data, y, sample_weights);
+
+  for (std::size_t j = 0; j < miss_progs.size(); ++j) {
+    h_progs[miss_indices[j]].raw_fitness_ = scores[j];
+    cache.emplace(std::move(miss_keys[j]), scores[j]);
   }
 }
 
