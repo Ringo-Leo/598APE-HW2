@@ -506,10 +506,11 @@ void run_symbolic_reconstruction(const std::string &png_file, int K) {
   ctimer_start(&end_to_end_timer);
 
   std::cout << ";;Loading " << png_file << std::endl;
-  std::vector<std::vector<float>> X = std::get<0>(utils::load_png(png_file));
-  std::vector<float> r = std::get<1>(utils::load_png(png_file));
-  std::vector<float> g = std::get<2>(utils::load_png(png_file));
-  std::vector<float> b = std::get<3>(utils::load_png(png_file));
+  auto val = utils::load_png(png_file);
+  std::vector<std::vector<float>> X = std::move(std::get<0>(val));
+  std::vector<float> r = std::move(std::get<1>(val));
+  std::vector<float> g = std::move(std::get<2>(val));
+  std::vector<float> b = std::move(std::get<3>(val));
   const bool monochrome = (r == g && g == b);
   // Use the same [-pi, pi] coordinate domain for every input image.
   // Exported channel functions still accept normalized (x,y) coordinates.
