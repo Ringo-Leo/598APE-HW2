@@ -3,6 +3,7 @@
 #include "node_detail.h"
 #include "philox_engine.h"
 #include "reg_stack.h"
+#include "fitness_cache.h"
 #include <algorithm>
 #include <cstdint>
 #include <fitness.h>
@@ -11,21 +12,43 @@
 #include <program.h>
 #include <random>
 #include <stack>
+#include <cstring>
 
 namespace genetic {
 
+static std::vector<uint32_t> make_program_key(const program &prog) {
+  std::vector<uint32_t> key;
+  key.reserve(1 + 2 * static_cast<std::size_t>(prog.len));
+  key.push_back(static_cast<uint32_t>(prog.len));
+
+  for (int i = 0; i < prog.len; ++i){
+    const node &n = prog.nodes[i];
+    key.push_back(static_cast<uint32_t>(n.t));
+
+    if(n.t == node::type::variable){
+      key.push_back(static_cast<uint32_t>(n.u.fid));
+    } else if (n.t == node::type::constant){
+      uint32_t bits;
+      static_assert(sizeof(bits) == sizeof(n.u.val));
+      std::memcpy(&bits, &n.u.val, sizeof(bits));
+      key.push_back(bits);
+    }
+  }
+  
+  return key;
+}
 /**
  * Execution kernel for a single program. We assume that the input data
  * is stored in column major format.
  */
 template <int MaxSize = MAX_STACK_SIZE>
-void execute_kernel(const program_t d_progs, const float *data, float *y_pred,
+void execute_kernel(const program_t *d_progs, const float *data, float *y_pred,
                     const uint64_t n_rows, const uint64_t n_progs) {
   for (uint64_t pid = 0; pid < n_progs; ++pid) {
     for (uint64_t row_id = 0; row_id < n_rows; ++row_id) {
 
       stack<float, MaxSize> eval_stack;
-      program_t curr_p = d_progs + pid; // Current program
+      program_t curr_p = *(d_progs + pid); // Current program
 
       int end = curr_p->len - 1;
       node *curr_node = curr_p->nodes + end;
@@ -106,13 +129,13 @@ void compute_metric(int n_rows, int n_progs, const float *y,
   }
 }
 
-void execute(const program_t &d_progs, const int n_rows, const int n_progs,
+void execute(const program_t *d_progs, const int n_rows, const int n_progs,
              const float *data, float *y_pred) {
   execute_kernel(d_progs, data, y_pred, static_cast<uint64_t>(n_rows),
                  static_cast<uint64_t>(n_progs));
 }
 
-void find_fitness(program_t d_prog, float *score, const param &params,
+void find_fitness(program_t *d_prog, float *score, const param &params,
                   const int n_rows, const float *data, const float *y,
                   const float *sample_weights) {
 
@@ -124,7 +147,7 @@ void find_fitness(program_t d_prog, float *score, const param &params,
   compute_metric(n_rows, 1, y, y_pred.data(), sample_weights, score, params);
 }
 
-void find_batched_fitness(int n_progs, program_t d_progs, float *score,
+void find_batched_fitness(int n_progs, program_t *d_progs, float *score,
                           const param &params, const int n_rows,
                           const float *data, const float *y,
                           const float *sample_weights) {
@@ -142,8 +165,9 @@ void set_fitness(program &h_prog, const param &params, const int n_rows,
                  const float *sample_weights) {
 
   std::vector<float> score(1);
+  program_t p = &h_prog;
 
-  find_fitness(&h_prog, score.data(), params, n_rows, data, y, sample_weights);
+  find_fitness(&p, score.data(), params, n_rows, data, y, sample_weights);
 
   // Update host and device score for program
   h_prog.raw_fitness_ = score[0];
@@ -152,18 +176,38 @@ void set_fitness(program &h_prog, const param &params, const int n_rows,
 void set_batched_fitness(int n_progs, std::vector<program> &h_progs,
                          const param &params, const int n_rows,
                          const float *data, const float *y,
-                         const float *sample_weights) {
+                         const float *sample_weights, FitnessCache &cache) {
 
-  std::vector<float> score(n_progs);
+  std::unordered_map<std::vector<uint32_t>, int, ProgramKeyHash> working_set;
+  std::vector<program *> miss_progs;
+  std::vector<std::pair<int, int>> miss_keys;
 
-  find_batched_fitness(n_progs, h_progs.data(), score.data(), params, n_rows,
-                       data, y, sample_weights);
+  for (int i = 0; i < n_progs; ++i) {
+    auto key = make_program_key(h_progs[i]);
 
-  // Update scores on host and device
-  // TODO: Find a way to reduce the number of implicit memory transfers
-  for (auto i = 0; i < n_progs; ++i) {
-    h_progs[i].raw_fitness_ = score[i];
+    if (auto it = cache.find(key); it != cache.end()) {
+      h_progs[i].raw_fitness_ = it->second;
+      continue;
+    }
+    auto [it, inserted] =
+        working_set.try_emplace(std::move(key), miss_progs.size());
+    if (inserted)
+      miss_progs.push_back(&h_progs[i]);
+    miss_keys.push_back(std::make_pair(i, it->second));
   }
+
+  if (miss_progs.empty())
+    return;
+
+  std::vector<float> scores(miss_progs.size());
+  find_batched_fitness(
+      static_cast<int>(miss_progs.size()), miss_progs.data(),
+      scores.data(), params, n_rows, data, y, sample_weights);
+
+  for (auto [i, idx] : miss_keys)
+    h_progs[i].raw_fitness_ = scores[idx];
+  for (auto &[key, idx] : working_set)
+    cache.emplace(key, scores[idx]);
 }
 
 float get_fitness(const program &prog, const param &params) {

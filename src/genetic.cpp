@@ -91,7 +91,7 @@ void tournament_kernel(const std::vector<program> &progs, int *win_indices,
 void cpp_evolve(const std::vector<program> &h_oldprogs,
                 std::vector<program> &h_nextprogs, const int n_samples,
                 const float *data, const float *y, const float *sample_weights,
-                const param &params, const int generation, const int seed) {
+                const param &params, const int generation, const int seed, FitnessCache &cache) {
   auto n_progs = params.population_size;
   auto tour_size = params.tournament_size;
   auto n_tours = n_progs; // at least num_progs tournaments
@@ -180,7 +180,7 @@ void cpp_evolve(const std::vector<program> &h_oldprogs,
 
   // Update raw fitness for all programs
   set_batched_fitness(n_progs, h_nextprogs, params, n_samples, data, y,
-                      sample_weights);
+                      sample_weights, cache);
 }
 
 float param::p_reproduce() const {
@@ -429,6 +429,7 @@ void symFit(const float *input, const float *labels,
 
   std::vector<program> h_currprogs(params.population_size);
   std::vector<program> h_nextprogs(params.population_size);
+  FitnessCache cache;
 
   std::vector<float> h_fitness(params.population_size, 0.0f);
 
@@ -446,7 +447,7 @@ void symFit(const float *input, const float *labels,
 
     // Evolve current generation
     cpp_evolve(h_currprogs, h_nextprogs, n_rows, input, labels, sample_weights,
-               params, (gen + 1), init_seed);
+               params, (gen + 1), init_seed, cache);
 
     // Update epochs
     ++params.num_epochs;
@@ -499,15 +500,16 @@ void symFit(const float *input, const float *labels,
 void symRegPredict(const float *input, const int n_rows,
                    const program_t &best_prog, float *output) {
   // Assume best_prog is on device
-  execute(best_prog, n_rows, 1, input, output);
+  const program_t *p = &best_prog;
+  execute(p, n_rows, 1, input, output);
 }
 
 void symClfPredictProbs(const float *input, const int n_rows,
                         const param &params, const program_t &best_prog,
                         float *output) {
-
+  const program_t *p = &best_prog;
   // Assume output is of shape [n_rows, 2] in colMajor format
-  execute(best_prog, n_rows, 1, input, output);
+  execute(p, n_rows, 1, input, output);
 
   // Apply 2 map operations
   if (params.transformer == transformer_t::sigmoid) {
@@ -543,7 +545,8 @@ void symTransform(const float *input, const param &params,
   // cudaStream_t stream = handle.get_stream();
   // Execute final_progs(ordered by fitness) on input
   // output of size [n_rows,hall_of_fame]
-  execute(final_progs, n_rows, params.n_components, input, output);
+  const program_t *p = &final_progs;
+  execute(p, n_rows, params.n_components, input, output);
 }
 
 } // namespace genetic
