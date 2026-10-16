@@ -14,7 +14,7 @@ namespace genetic {
 template <typename DataT, int MaxSize> struct stack {
   explicit stack() : elements_(0) {
     for (int i = 0; i < MaxSize; ++i) {
-      regs_[i] = DataT(0);
+      regs_[i] = DataT(0.0f);
     }
   }
 
@@ -56,7 +56,7 @@ template <typename DataT, int MaxSize> struct stack {
    */
   DataT pop() {
     if (empty())
-      return DataT(0);
+      return DataT(0.0f);
     return regs_[--elements_];
   }
 
