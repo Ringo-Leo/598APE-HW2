@@ -37,3 +37,4 @@ genetic_benchmark
 
 silk.rkt
 square.rkt
+perf/
