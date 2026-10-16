@@ -77,7 +77,7 @@ void execute_kernel(const program_t *d_progs, const float *data, float *y_pred,
 }
 
 template <int MaxSize = MAX_STACK_SIZE>
-void execute_kernel_and_score(const program_t d_progs, const float *data,
+void execute_kernel_and_score(const program_t *d_progs, const float *data,
                               float *y_pred, const uint64_t n_rows,
                               const uint64_t n_progs, metric_t metric,
                               const float *y, const float *w, float *score) {
@@ -91,7 +91,7 @@ void execute_kernel_and_score(const program_t d_progs, const float *data,
     }
   };
   for (uint64_t pid = 0; pid < n_progs; ++pid) {
-    program_t curr_p = d_progs + pid; // Current program
+    program_t curr_p = *(d_progs + pid); // Current program
     for (uint64_t row_id = 0; row_id < n_rows; ++row_id) {
 
       stack<float, MaxSize> eval_stack;
