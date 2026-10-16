@@ -2,6 +2,7 @@
 
 #include "common.h"
 #include "philox_engine.h"
+#include "fitness_cache.h"
 #include <random>
 
 namespace genetic {
@@ -74,7 +75,7 @@ typedef program *program_t;
  * @param data       Pointer to input dataset (in col-major format)
  * @param y_pred     Pointer to output of program evaluation
  */
-void execute(const program_t &d_progs, const int n_rows, const int n_progs,
+void execute(const program_t *d_progs, const int n_rows, const int n_progs,
              const float *data, float *y_pred);
 
 /**
@@ -106,7 +107,7 @@ void compute_metric(int n_rows, int n_progs, const float *y,
  * @param y               Device pointer to input labels
  * @param sample_weights  Device pointer to sample weights
  */
-void find_fitness(program_t d_prog, float *score, const param &params,
+void find_fitness(program_t *d_prog, float *score, const param &params,
                   const int n_rows, const float *data, const float *y,
                   const float *sample_weights);
 
@@ -123,7 +124,7 @@ void find_fitness(program_t d_prog, float *score, const param &params,
  * @param y               Device pointer to input labels
  * @param sample_weights  Device pointer to sample weights
  */
-void find_batched_fitness(int n_progs, program_t d_progs, float *score,
+void find_batched_fitness(int n_progs, program_t *d_progs, float *score,
                           const param &params, const int n_rows,
                           const float *data, const float *y,
                           const float *sample_weights);
@@ -159,7 +160,7 @@ void set_fitness(program_t &d_prog, program &h_prog, const param &params,
 void set_batched_fitness(int n_progs, std::vector<program> &h_progs,
                          const param &params, const int n_rows,
                          const float *data, const float *y,
-                         const float *sample_weights);
+                         const float *sample_weights, FitnessCache &cache);
 
 /**
  * @brief Returns precomputed fitness score of program,
