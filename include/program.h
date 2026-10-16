@@ -61,6 +61,7 @@ struct program {
   metric_t metric;
   /** mutation type responsible for production */
   mutation_t mut_type;
+  bool fit_valid = false;
 }; // struct program
 
 /** program_t is a shorthand for device programs */

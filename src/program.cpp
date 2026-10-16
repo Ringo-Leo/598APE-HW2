@@ -92,6 +92,10 @@ void execute_kernel_and_score(const program_t *d_progs, const float *data,
   };
   for (uint64_t pid = 0; pid < n_progs; ++pid) {
     program_t curr_p = *(d_progs + pid); // Current program
+    if (curr_p->fit_valid) {
+      score[pid] = curr_p->raw_fitness_;
+      curr_p->fit_valid = false;
+    }
     for (uint64_t row_id = 0; row_id < n_rows; ++row_id) {
 
       stack<float, MaxSize> eval_stack;

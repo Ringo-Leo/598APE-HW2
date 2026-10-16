@@ -172,6 +172,7 @@ void cpp_evolve(const std::vector<program> &h_oldprogs,
                        h_gen);
       } else if (h_nextprogs[pos].mut_type == mutation_t::reproduce) {
         h_nextprogs[pos] = h_oldprogs[parent_index];
+        h_nextprogs[pos].fit_valid = true;
       } else {
         // Should not come here
       }
