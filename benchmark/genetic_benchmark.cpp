@@ -186,20 +186,17 @@ float accuracy(const std::vector<float> &y_true,
 using namespace genetic;
 
 int selectBestProgram(const genetic::program *programs, int size) {
-  if(size < 1){
-    throw std::invalid_argument("Population must contain at least 1 program");
-  }
 
-  int best0 = -1;
-  float best0_fitness = std::numeric_limits<float>::max();
+  int best0 = 0;
+  float best0_fitness = programs[0].raw_fitness_;
 
-  for(int i = 0; i < size; ++i){
+  for(int i = 1; i < size; ++i){
     float fitness = programs[i].raw_fitness_;
     if (std::isnan(fitness)) {
       fitness = std::numeric_limits<float>::max();
     }
 
-    if(best0 == -1 || fitness < best0_fitness){
+    if(fitness < best0_fitness){
       best0 = i;
       best0_fitness = fitness;
     }
@@ -212,24 +209,32 @@ std::array<int, 2> selectBestTwoPrograms(const genetic::program *programs, int s
     throw std::invalid_argument("Population must contain at least 2 programs");
   }
 
-  int best0 = -1;
-  int best1 = -1;
-  float best0_fitness = std::numeric_limits<float>::max();
-  float best1_fitness = std::numeric_limits<float>::max();
+  float f0 = programs[0].raw_fitness_;
+  float f1 = programs[1].raw_fitness_;
+  if (std::isnan(f0))
+    f0 = std::numeric_limits<float>::max();
+  if (std::isnan(f1))
+    f1 = std::numeric_limits<float>::max();
 
-  for(int i = 0; i < size; ++i){
+  bool second_better = f1 < f0;
+  int best0 = second_better ? 1 : 0;
+  int best1 = second_better ? 0 : 1;
+  float best0_fitness = second_better ? f1 : f0;
+  float best1_fitness = second_better ? f0 : f1;
+
+  for(int i = 2; i < size; ++i){
     float fitness = programs[i].raw_fitness_;
     if (std::isnan(fitness)) {
       fitness = std::numeric_limits<float>::max();
     }
 
-    if(best0 == -1 || fitness < best0_fitness){
+    if(fitness < best0_fitness){
       best1 = best0;
       best1_fitness = best0_fitness;
 
       best0 = i;
       best0_fitness = fitness;
-    } else if(best1 == -1 || fitness < best1_fitness){
+    } else if(fitness < best1_fitness){
       best1 = i;
       best1_fitness = fitness;
     }
