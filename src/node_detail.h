@@ -27,8 +27,9 @@ inline int arity(node::type t) {
 }
 
 // `data` assumed to be stored in col-major format
-inline float evaluate_node(const node &n, const float *data, const uint64_t stride,
-                    const uint64_t idx, const float *in) {
+__attribute__((always_inline)) inline float
+evaluate_node(const node &n, const float *data, const uint64_t stride,
+              const uint64_t idx, const float *in) {
   if (n.t == node::type::constant) {
     return n.u.val;
   } else if (n.t == node::type::variable) {
