@@ -452,8 +452,7 @@ void symFit(const float *input, const float *labels,
     // Update epochs
     ++params.num_epochs;
 
-    // Update h_currprogs (deepcopy)
-    h_currprogs = h_nextprogs;
+    std::swap(h_currprogs, h_nextprogs);
 
     // Update evolution history, depending on the low memory flag
     if (!params.low_memory || gen == 0) {
