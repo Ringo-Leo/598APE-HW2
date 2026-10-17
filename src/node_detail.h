@@ -112,7 +112,7 @@ inline float do_single_value(const node &n, float *in) {
 }
 
 // `data` assumed to be stored in col-major format
-__attribute__((always_inline)) inline detail::NodeType evaluate_node(const node &n, const float *data,
+inline detail::NodeType evaluate_node(const node &n, const float *data,
                                       const uint64_t stride,
                                       const uint64_t idx_start,
                                       const detail::NodeType *in,
