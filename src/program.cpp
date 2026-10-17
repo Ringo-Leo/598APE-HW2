@@ -46,16 +46,17 @@ template <int MaxSize = MAX_STACK_SIZE>
 void execute_kernel(const program_t *d_progs, const float *data, float *y_pred,
                     const uint64_t n_rows, const uint64_t n_progs) {
   for (uint64_t pid = 0; pid < n_progs; ++pid) {
-    for (uint64_t row_id = 0; row_id < n_rows; ++row_id) {
-
-      stack<float, MaxSize> eval_stack;
+    for (uint64_t row_id_start = 0; row_id_start < n_rows;
+         row_id_start += KERNEL_TILED_SIZE) {
+      uint64_t row_id_end = std::min(row_id_start + KERNEL_TILED_SIZE, n_rows);
+      stack<detail::NodeType, MaxSize> eval_stack;
       program_t curr_p = *(d_progs + pid); // Current program
 
       int end = curr_p->len - 1;
       node *curr_node = curr_p->nodes + end;
 
-      float res = 0.0f;
-      float in[2] = {0.0f, 0.0f};
+      detail::NodeType res = 0.0f;
+      detail::NodeType in[2] = {0.0f, 0.0f};
 
       while (end >= 0) {
         if (detail::is_nonterminal(curr_node->t)) {
@@ -64,14 +65,21 @@ void execute_kernel(const program_t *d_progs, const float *data, float *y_pred,
           if (ar > 1)
             in[1] = eval_stack.pop();
         }
-        res = detail::evaluate_node(*curr_node, data, n_rows, row_id, in);
-        eval_stack.push(res);
+        res = detail::evaluate_node(*curr_node, data, n_rows, row_id_start, in,
+                                    row_id_end - row_id_start);
+        eval_stack.push(std::move(res));
         curr_node--;
         end--;
       }
-
+      detail::NodeType output = eval_stack.pop();
       // Outputs stored in col-major format
-      y_pred[pid * n_rows + row_id] = eval_stack.pop();
+      for (int i = 0; i + row_id_start < row_id_end; ++i) {
+        if (auto *p = std::get_if<float>(&output))
+          y_pred[pid * n_rows + row_id_start + i] = *p;
+        else if (auto *p =
+                     std::get_if<std::array<float, KERNEL_TILED_SIZE>>(&output))
+          y_pred[pid * n_rows + row_id_start + i] = (*p)[i];
+      }
     }
   }
 }
