@@ -225,8 +225,6 @@ template <typename math_t = float>
 void meanSquareError(const uint64_t n_samples, const uint64_t n_progs,
                      const math_t *Y, const math_t *Y_pred, const math_t *W,
                      math_t *out, math_t WS) {
-
-  std::vector<math_t> error(n_samples * n_progs);
   math_t N = static_cast<math_t>(n_samples);
 
   // Compute absolute differences
