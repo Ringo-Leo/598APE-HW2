@@ -1,11 +1,13 @@
 #include "constants.h"
 #include "custom_distributions.h"
+#include "fitness_cache.h"
 #include "node_detail.h"
 #include "philox_engine.h"
 #include "reg_stack.h"
-#include "fitness_cache.h"
+#include "subtree_cache.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <fitness.h>
 #include <limits>
 #include <node.h>
@@ -13,7 +15,6 @@
 #include <program.h>
 #include <random>
 #include <stack>
-#include <cstring>
 
 namespace genetic {
 
@@ -38,36 +39,111 @@ static std::vector<uint32_t> make_program_key(const program &prog) {
   
   return key;
 }
+
+struct Action {
+  int idx;
+  const float *load;
+  float *store;
+};
+
+static void build_actions(const program &p, uint64_t n_rows,
+                          SubTreeCache *cache, std::vector<Action> &actions,
+                          std::vector<SubTreeEntry *> &filled, int *sz) {
+  for (int i = 0; i < p.len;) {
+    if (cache && sz[i] >= SubTreeCache::MIN_SIZE) {
+      auto &mp = cache->cache;
+      std::string key(reinterpret_cast<const char *>(p.nodes + i),
+                      sz[i] * sizeof(node));
+      auto it = mp.find(key);
+      if (it != mp.end() && it->second.ready) {
+        it->second.last = cache->cur;
+        actions.push_back({i, it->second.out.data(), nullptr});
+        i += sz[i];
+        continue;
+      }
+      if (it == mp.end() &&
+          cache->bytes + n_rows * sizeof(float) <= cache->budget) {
+        SubTreeEntry &ent = mp[std::move(key)];
+        ent.out.resize(n_rows);
+        ent.last = cache->cur;
+        cache->bytes += n_rows * sizeof(float);
+        filled.push_back(&ent);
+        actions.push_back({i, nullptr, ent.out.data()});
+        ++i;
+        continue;
+      }
+    }
+    actions.push_back({i, nullptr, nullptr});
+    ++i;
+  }
+}
+
 /**
- * Evaluate a single program over all rows, KERNEL_TILED_SIZE rows at a time.
+ * Evaluate a single program over all rows, KERNEL_TILED_SIZE rows at a time,
+ * reusing and filling the subtree cache when one is given.
  * We assume that the input data is stored in column major format.
  */
 template <int MaxSize = MAX_STACK_SIZE>
 inline void execute_program_tiled(const program_t curr_p, const float *data,
-                                  float *y_pred, const uint64_t n_rows) {
+                                  float *y_pred, const uint64_t n_rows,
+                                  SubTreeCache *subtree_cache) {
+  const int len = curr_p->len;
+  std::vector<int> sz(len);
+  std::vector<int> st;
+  std::vector<Action> acts;
+  std::vector<SubTreeEntry *> ents;
+  st.reserve(MAX_STACK_SIZE);
+  for (int i = len - 1; i >= 0; --i) {
+    const node &n = curr_p->nodes[i];
+    int s = 1;
+    if (detail::is_nonterminal(n.t)) {
+      s += st.back();
+      st.pop_back();
+      if (detail::arity(n.t) > 1) {
+        s += st.back();
+        st.pop_back();
+      }
+    }
+    sz[i] = s;
+    st.push_back(s);
+  }
+  build_actions(*curr_p, n_rows, subtree_cache, acts, ents, sz.data());
+
   for (uint64_t row_id_start = 0; row_id_start < n_rows;
        row_id_start += KERNEL_TILED_SIZE) {
     uint64_t row_id_end = std::min(row_id_start + KERNEL_TILED_SIZE, n_rows);
+    int n = row_id_end - row_id_start;
     stack<detail::NodeType, MaxSize> eval_stack;
-
-    int end = curr_p->len - 1;
-    node *curr_node = curr_p->nodes + end;
 
     detail::NodeType res = 0.0f;
     detail::NodeType in[2] = {0.0f, 0.0f};
 
-    while (end >= 0) {
-      if (detail::is_nonterminal(curr_node->t)) {
-        int ar = detail::arity(curr_node->t);
-        in[0] = eval_stack.pop(); // Min arity of function is 1
+    for (int j = acts.size() - 1; j >= 0; --j) {
+      const Action &act = acts[j];
+
+      if (act.load) {
+        std::array<float, KERNEL_TILED_SIZE> arr;
+        std::copy(act.load + row_id_start, act.load + row_id_end, arr.begin());
+        eval_stack.push(arr);
+        continue;
+      }
+      const node &node = curr_p->nodes[act.idx];
+      if (detail::is_nonterminal(node.t)) {
+        int ar = detail::arity(node.t);
+        in[0] = eval_stack.pop();
         if (ar > 1)
           in[1] = eval_stack.pop();
       }
-      res = detail::evaluate_node(*curr_node, data, n_rows, row_id_start, in,
-                                  row_id_end - row_id_start);
+      res = detail::evaluate_node(node, data, n_rows, row_id_start, in, n);
+      if (act.store) {
+        if (auto *v = std::get_if<float>(&res))
+          std::fill(act.store + row_id_start, act.store + row_id_end, *v);
+        else {
+          auto &a = std::get<std::array<float, KERNEL_TILED_SIZE>>(res);
+          std::copy(a.begin(), a.begin() + n, act.store + row_id_start);
+        }
+      }
       eval_stack.push(std::move(res));
-      curr_node--;
-      end--;
     }
     detail::NodeType output = eval_stack.pop();
     // Outputs stored in col-major format
@@ -79,6 +155,8 @@ inline void execute_program_tiled(const program_t curr_p, const float *data,
         y_pred[row_id_start + i] = (*p)[i];
     }
   }
+  for (SubTreeEntry *e : ents)
+    e->ready = true;
 }
 
 /**
@@ -87,10 +165,11 @@ inline void execute_program_tiled(const program_t curr_p, const float *data,
  */
 template <int MaxSize = MAX_STACK_SIZE>
 void execute_kernel(const program_t *d_progs, const float *data, float *y_pred,
-                    const uint64_t n_rows, const uint64_t n_progs) {
+                    const uint64_t n_rows, const uint64_t n_progs,
+                    SubTreeCache *subtree_cache) {
   for (uint64_t pid = 0; pid < n_progs; ++pid) {
-    execute_program_tiled<MaxSize>(*(d_progs + pid), data,
-                                   y_pred + pid * n_rows, n_rows);
+    execute_program_tiled<MaxSize>(
+        *(d_progs + pid), data, y_pred + pid * n_rows, n_rows, subtree_cache);
   }
 }
 
@@ -98,7 +177,8 @@ template <int MaxSize = MAX_STACK_SIZE>
 void execute_kernel_and_score(const program_t *d_progs, const float *data,
                               float *y_pred, const uint64_t n_rows,
                               const uint64_t n_progs, metric_t metric,
-                              const float *y, const float *w, float *score) {
+                              const float *y, const float *w, float *score,
+                              SubTreeCache *subtree_cache) {
   float WS = std::numeric_limits<float>::min();
   auto initWS = [&]() {
     if (WS == std::numeric_limits<float>::min()) {
@@ -109,7 +189,8 @@ void execute_kernel_and_score(const program_t *d_progs, const float *data,
     }
   };
   for (uint64_t pid = 0; pid < n_progs; ++pid) {
-    execute_program_tiled<MaxSize>(*(d_progs + pid), data, y_pred, n_rows);
+    execute_program_tiled<MaxSize>(*(d_progs + pid), data, y_pred, n_rows,
+                                   subtree_cache);
     if (metric == metric_t::pearson) {
       weightedPearson(n_rows, 1, y, y_pred, w, &score[pid]);
     } else if (metric == metric_t::spearman) {
@@ -198,9 +279,9 @@ void compute_metric(int n_rows, int n_progs, const float *y,
 }
 
 void execute(const program_t *d_progs, const int n_rows, const int n_progs,
-             const float *data, float *y_pred) {
+             const float *data, float *y_pred, SubTreeCache *subtree_cache) {
   execute_kernel(d_progs, data, y_pred, static_cast<uint64_t>(n_rows),
-                 static_cast<uint64_t>(n_progs));
+                 static_cast<uint64_t>(n_progs), subtree_cache);
 }
 
 void find_fitness(program_t *d_prog, float *score, const param &params,
@@ -218,12 +299,14 @@ void find_fitness(program_t *d_prog, float *score, const param &params,
 void find_batched_fitness(int n_progs, program_t *d_progs, float *score,
                           const param &params, const int n_rows,
                           const float *data, const float *y,
-                          const float *sample_weights) {
+                          const float *sample_weights,
+                          SubTreeCache *subtree_cache) {
 
   std::vector<float> y_pred((uint64_t)n_rows);
-  execute_kernel_and_score(
-      d_progs, data, y_pred.data(), static_cast<uint64_t>(n_rows),
-      static_cast<uint64_t>(n_progs), params.metric, y, sample_weights, score);
+  execute_kernel_and_score(d_progs, data, y_pred.data(),
+                           static_cast<uint64_t>(n_rows),
+                           static_cast<uint64_t>(n_progs), params.metric, y,
+                           sample_weights, score, subtree_cache);
 }
 
 void set_fitness(program &h_prog, const param &params, const int n_rows,
@@ -242,11 +325,20 @@ void set_fitness(program &h_prog, const param &params, const int n_rows,
 void set_batched_fitness(int n_progs, std::vector<program> &h_progs,
                          const param &params, const int n_rows,
                          const float *data, const float *y,
-                         const float *sample_weights, FitnessCache &cache) {
-
+                         const float *sample_weights, FitnessCache &cache,
+                         SubTreeCache &subtree_cache) {
   std::unordered_map<std::vector<uint32_t>, int, ProgramKeyHash> working_set;
   std::vector<program *> miss_progs;
   std::vector<std::pair<int, int>> miss_keys;
+  subtree_cache.cur++;
+  for (auto it = subtree_cache.cache.begin();
+       it != subtree_cache.cache.end();) {
+    if (it->second.last < subtree_cache.cur - 1) {
+      subtree_cache.bytes -= it->second.out.size() * sizeof(float);
+      it = subtree_cache.cache.erase(it);
+    } else
+      ++it;
+  }
 
   for (int i = 0; i < n_progs; ++i) {
     auto key = make_program_key(h_progs[i]);
@@ -266,9 +358,9 @@ void set_batched_fitness(int n_progs, std::vector<program> &h_progs,
     return;
 
   std::vector<float> scores(miss_progs.size());
-  find_batched_fitness(
-      static_cast<int>(miss_progs.size()), miss_progs.data(),
-      scores.data(), params, n_rows, data, y, sample_weights);
+  find_batched_fitness(static_cast<int>(miss_progs.size()), miss_progs.data(),
+                       scores.data(), params, n_rows, data, y, sample_weights,
+                       &subtree_cache);
 
   for (auto [i, idx] : miss_keys)
     h_progs[i].raw_fitness_ = scores[idx];
