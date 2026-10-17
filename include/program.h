@@ -1,8 +1,9 @@
 #pragma once
 
 #include "common.h"
-#include "philox_engine.h"
 #include "fitness_cache.h"
+#include "philox_engine.h"
+#include "subtree_cache.h"
 #include <random>
 
 namespace genetic {
@@ -76,7 +77,8 @@ typedef program *program_t;
  * @param y_pred     Pointer to output of program evaluation
  */
 void execute(const program_t *d_progs, const int n_rows, const int n_progs,
-             const float *data, float *y_pred);
+             const float *data, float *y_pred,
+             SubTreeCache *subtree_cache = nullptr);
 
 /**
  * @brief Compute the loss based on the metric specified in the training
@@ -127,7 +129,8 @@ void find_fitness(program_t *d_prog, float *score, const param &params,
 void find_batched_fitness(int n_progs, program_t *d_progs, float *score,
                           const param &params, const int n_rows,
                           const float *data, const float *y,
-                          const float *sample_weights);
+                          const float *sample_weights,
+                          SubTreeCache *subtree_cache);
 
 /**
  * @brief Computes and sets the fitness scores for a single program on the given
@@ -160,7 +163,8 @@ void set_fitness(program_t &d_prog, program &h_prog, const param &params,
 void set_batched_fitness(int n_progs, std::vector<program> &h_progs,
                          const param &params, const int n_rows,
                          const float *data, const float *y,
-                         const float *sample_weights, FitnessCache &cache);
+                         const float *sample_weights, FitnessCache &cache,
+                         SubTreeCache &subtree_cache);
 
 /**
  * @brief Returns precomputed fitness score of program,

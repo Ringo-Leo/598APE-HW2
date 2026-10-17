@@ -2,19 +2,21 @@
 #include "constants.h"
 #include "custom_distributions.h"
 #include "node_detail.h"
+#include "subtree_cache.h"
 #include <algorithm>
 #include <common.h>
 #include <genetic.h>
-#include <iostream>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <ostream>
 #include <philox_engine.h>
 #include <program.h>
 #include <random>
-#include <stack>
 #include <sstream>
+#include <stack>
+#include <unordered_map>
 namespace genetic {
 
 /**
@@ -91,7 +93,8 @@ void tournament_kernel(const std::vector<program> &progs, int *win_indices,
 void cpp_evolve(const std::vector<program> &h_oldprogs,
                 std::vector<program> &h_nextprogs, const int n_samples,
                 const float *data, const float *y, const float *sample_weights,
-                const param &params, const int generation, const int seed, FitnessCache &cache) {
+                const param &params, const int generation, const int seed,
+                FitnessCache &cache, SubTreeCache &subtree_cache) {
   auto n_progs = params.population_size;
   auto tour_size = params.tournament_size;
   auto n_tours = n_progs; // at least num_progs tournaments
@@ -180,7 +183,7 @@ void cpp_evolve(const std::vector<program> &h_oldprogs,
 
   // Update raw fitness for all programs
   set_batched_fitness(n_progs, h_nextprogs, params, n_samples, data, y,
-                      sample_weights, cache);
+                      sample_weights, cache, subtree_cache);
 }
 
 float param::p_reproduce() const {
@@ -436,6 +439,7 @@ void symFit(const float *input, const float *labels,
   PhiloxEngine h_gen_engine(params.random_state);
   ;
   uniform_int_distribution_custom<int> seed_dist;
+  SubTreeCache cache_tree;
 
   /* Begin training */
   auto gen = 0;
@@ -447,7 +451,7 @@ void symFit(const float *input, const float *labels,
 
     // Evolve current generation
     cpp_evolve(h_currprogs, h_nextprogs, n_rows, input, labels, sample_weights,
-               params, (gen + 1), init_seed, cache);
+               params, (gen + 1), init_seed, cache, cache_tree);
 
     // Update epochs
     ++params.num_epochs;
