@@ -123,7 +123,8 @@ void execute_kernel_and_score(const program_t *d_progs, const float *data,
       initWS();
       rootMeanSquareError(n_rows, 1, y, y_pred, w, &score[pid], WS);
     } else if (metric == metric_t::logloss) {
-      logLoss(n_rows, 1, y, y_pred, w, &score[pid]);
+      initWS();
+      logLoss(n_rows, 1, y, y_pred, w, &score[pid], WS);
     } else {
       // This should not be reachable
     }
@@ -189,7 +190,8 @@ void compute_metric(int n_rows, int n_progs, const float *y,
     initWS();
     rootMeanSquareError(n_rows, n_progs, y, y_pred, w, score, WS);
   } else if (params.metric == metric_t::logloss) {
-    logLoss(n_rows, n_progs, y, y_pred, w, score);
+    initWS();
+    logLoss(n_rows, n_progs, y, y_pred, w, score, WS);
   } else {
     // This should not be reachable
   }
