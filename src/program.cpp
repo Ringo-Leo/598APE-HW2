@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fitness.h>
+#include <limits>
 #include <node.h>
 #include <numeric>
 #include <program.h>
@@ -78,6 +79,87 @@ static void build_actions(const program &p, uint64_t n_rows,
 }
 
 /**
+ * Evaluate a single program over all rows, KERNEL_TILED_SIZE rows at a time,
+ * reusing and filling the subtree cache when one is given.
+ * We assume that the input data is stored in column major format.
+ */
+template <int MaxSize = MAX_STACK_SIZE>
+inline void execute_program_tiled(const program_t curr_p, const float *data,
+                                  float *y_pred, const uint64_t n_rows,
+                                  SubTreeCache *subtree_cache) {
+  const int len = curr_p->len;
+  std::vector<int> sz(len);
+  std::vector<int> st;
+  std::vector<Action> acts;
+  std::vector<SubTreeEntry *> ents;
+  st.reserve(MAX_STACK_SIZE);
+  for (int i = len - 1; i >= 0; --i) {
+    const node &n = curr_p->nodes[i];
+    int s = 1;
+    if (detail::is_nonterminal(n.t)) {
+      s += st.back();
+      st.pop_back();
+      if (detail::arity(n.t) > 1) {
+        s += st.back();
+        st.pop_back();
+      }
+    }
+    sz[i] = s;
+    st.push_back(s);
+  }
+  build_actions(*curr_p, n_rows, subtree_cache, acts, ents, sz.data());
+
+  for (uint64_t row_id_start = 0; row_id_start < n_rows;
+       row_id_start += KERNEL_TILED_SIZE) {
+    uint64_t row_id_end = std::min(row_id_start + KERNEL_TILED_SIZE, n_rows);
+    int n = row_id_end - row_id_start;
+    stack<detail::NodeType, MaxSize> eval_stack;
+
+    detail::NodeType res = 0.0f;
+    detail::NodeType in[2] = {0.0f, 0.0f};
+
+    for (int j = acts.size() - 1; j >= 0; --j) {
+      const Action &act = acts[j];
+
+      if (act.load) {
+        std::array<float, KERNEL_TILED_SIZE> arr;
+        std::copy(act.load + row_id_start, act.load + row_id_end, arr.begin());
+        eval_stack.push(arr);
+        continue;
+      }
+      const node &node = curr_p->nodes[act.idx];
+      if (detail::is_nonterminal(node.t)) {
+        int ar = detail::arity(node.t);
+        in[0] = eval_stack.pop();
+        if (ar > 1)
+          in[1] = eval_stack.pop();
+      }
+      res = detail::evaluate_node(node, data, n_rows, row_id_start, in, n);
+      if (act.store) {
+        if (auto *v = std::get_if<float>(&res))
+          std::fill(act.store + row_id_start, act.store + row_id_end, *v);
+        else {
+          auto &a = std::get<std::array<float, KERNEL_TILED_SIZE>>(res);
+          std::copy(a.begin(), a.begin() + n, act.store + row_id_start);
+        }
+      }
+      eval_stack.push(std::move(res));
+    }
+    detail::NodeType output = eval_stack.pop();
+    // Outputs stored in col-major format
+    for (int i = 0; i + row_id_start < row_id_end; ++i) {
+      if (auto *p = std::get_if<float>(&output))
+        y_pred[row_id_start + i] = *p;
+      else if (auto *p =
+                   std::get_if<std::array<float, KERNEL_TILED_SIZE>>(&output))
+        y_pred[row_id_start + i] = (*p)[i];
+    }
+  }
+  for (SubTreeEntry *e : ents)
+    e->ready = true;
+}
+
+/**
  * Execution kernel for a single program. We assume that the input data
  * is stored in column major format.
  */
@@ -86,78 +168,47 @@ void execute_kernel(const program_t *d_progs, const float *data, float *y_pred,
                     const uint64_t n_rows, const uint64_t n_progs,
                     SubTreeCache *subtree_cache) {
   for (uint64_t pid = 0; pid < n_progs; ++pid) {
-    program_t curr_p = *(d_progs + pid); // Current program
-    const int len = curr_p->len;
-    std::vector<int> sz(len);
-    std::vector<int> st;
-    std::vector<Action> acts;
-    std::vector<SubTreeEntry *> ents;
-    st.reserve(MAX_STACK_SIZE);
-    for (int i = len - 1; i >= 0; --i) {
-      const node &n = curr_p->nodes[i];
-      int s = 1;
-      if (detail::is_nonterminal(n.t)) {
-        s += st.back();
-        st.pop_back();
-        if (detail::arity(n.t) > 1) {
-          s += st.back();
-          st.pop_back();
-        }
-      }
-      sz[i] = s;
-      st.push_back(s);
-    }
-    build_actions(*curr_p, n_rows, subtree_cache, acts, ents, sz.data());
+    execute_program_tiled<MaxSize>(
+        *(d_progs + pid), data, y_pred + pid * n_rows, n_rows, subtree_cache);
+  }
+}
 
-    for (uint64_t row_id_start = 0; row_id_start < n_rows;
-         row_id_start += KERNEL_TILED_SIZE) {
-      uint64_t row_id_end = std::min(row_id_start + KERNEL_TILED_SIZE, n_rows);
-      int n = row_id_end - row_id_start;
-      stack<detail::NodeType, MaxSize> eval_stack;
-
-      detail::NodeType res = 0.0f;
-      detail::NodeType in[2] = {0.0f, 0.0f};
-
-      for (int j = acts.size() - 1; j >= 0; --j) {
-        const Action &act = acts[j];
-
-        if (act.load) {
-          std::array<float, KERNEL_TILED_SIZE> arr;
-          std::copy(act.load + row_id_start, act.load + row_id_end,
-                    arr.begin());
-          eval_stack.push(arr);
-          continue;
-        }
-        const node &node = curr_p->nodes[act.idx];
-        if (detail::is_nonterminal(node.t)) {
-          int ar = detail::arity(node.t);
-          in[0] = eval_stack.pop();
-          if (ar > 1)
-            in[1] = eval_stack.pop();
-        }
-        res = detail::evaluate_node(node, data, n_rows, row_id_start, in, n);
-        if (act.store) {
-          if (auto *v = std::get_if<float>(&res))
-            std::fill(act.store + row_id_start, act.store + row_id_end, *v);
-          else {
-            auto &a = std::get<std::array<float, KERNEL_TILED_SIZE>>(res);
-            std::copy(a.begin(), a.begin() + n, act.store + row_id_start);
-          }
-        }
-        eval_stack.push(std::move(res));
-      }
-      detail::NodeType output = eval_stack.pop();
-      // Outputs stored in col-major format
-      for (int i = 0; i + row_id_start < row_id_end; ++i) {
-        if (auto *p = std::get_if<float>(&output))
-          y_pred[pid * n_rows + row_id_start + i] = *p;
-        else if (auto *p =
-                     std::get_if<std::array<float, KERNEL_TILED_SIZE>>(&output))
-          y_pred[pid * n_rows + row_id_start + i] = (*p)[i];
+template <int MaxSize = MAX_STACK_SIZE>
+void execute_kernel_and_score(const program_t *d_progs, const float *data,
+                              float *y_pred, const uint64_t n_rows,
+                              const uint64_t n_progs, metric_t metric,
+                              const float *y, const float *w, float *score,
+                              SubTreeCache *subtree_cache) {
+  float WS = std::numeric_limits<float>::min();
+  auto initWS = [&]() {
+    if (WS == std::numeric_limits<float>::min()) {
+      WS = 0;
+      for (uint64_t i = 0; i < n_rows; ++i) {
+        WS += w[i];
       }
     }
-    for (SubTreeEntry *e : ents)
-      e->ready = true;
+  };
+  for (uint64_t pid = 0; pid < n_progs; ++pid) {
+    execute_program_tiled<MaxSize>(*(d_progs + pid), data, y_pred, n_rows,
+                                   subtree_cache);
+    if (metric == metric_t::pearson) {
+      weightedPearson(n_rows, 1, y, y_pred, w, &score[pid]);
+    } else if (metric == metric_t::spearman) {
+      weightedSpearman(n_rows, 1, y, y_pred, w, &score[pid]);
+    } else if (metric == metric_t::mae) {
+      meanAbsoluteError(n_rows, 1, y, y_pred, w, &score[pid]);
+    } else if (metric == metric_t::mse) {
+      initWS();
+      meanSquareError(n_rows, 1, y, y_pred, w, &score[pid], WS);
+    } else if (metric == metric_t::rmse) {
+      initWS();
+      rootMeanSquareError(n_rows, 1, y, y_pred, w, &score[pid], WS);
+    } else if (metric == metric_t::logloss) {
+      initWS();
+      logLoss(n_rows, 1, y, y_pred, w, &score[pid], WS);
+    } else {
+      // This should not be reachable
+    }
   }
 }
 
@@ -197,6 +248,15 @@ program &program::operator=(const program &src) {
 void compute_metric(int n_rows, int n_progs, const float *y,
                     const float *y_pred, const float *w, float *score,
                     const param &params) {
+  float WS = std::numeric_limits<float>::min();
+  auto initWS = [&]() {
+    if (WS == std::numeric_limits<float>::min()) {
+      WS = 0;
+      for (uint64_t i = 0; i < n_rows; ++i) {
+        WS += w[i];
+      }
+    }
+  };
   // Call appropriate metric function based on metric defined in params
   if (params.metric == metric_t::pearson) {
     weightedPearson(n_rows, n_progs, y, y_pred, w, score);
@@ -205,11 +265,14 @@ void compute_metric(int n_rows, int n_progs, const float *y,
   } else if (params.metric == metric_t::mae) {
     meanAbsoluteError(n_rows, n_progs, y, y_pred, w, score);
   } else if (params.metric == metric_t::mse) {
-    meanSquareError(n_rows, n_progs, y, y_pred, w, score);
+    initWS();
+    meanSquareError(n_rows, n_progs, y, y_pred, w, score, WS);
   } else if (params.metric == metric_t::rmse) {
-    rootMeanSquareError(n_rows, n_progs, y, y_pred, w, score);
+    initWS();
+    rootMeanSquareError(n_rows, n_progs, y, y_pred, w, score, WS);
   } else if (params.metric == metric_t::logloss) {
-    logLoss(n_rows, n_progs, y, y_pred, w, score);
+    initWS();
+    logLoss(n_rows, n_progs, y, y_pred, w, score, WS);
   } else {
     // This should not be reachable
   }
@@ -239,12 +302,11 @@ void find_batched_fitness(int n_progs, program_t *d_progs, float *score,
                           const float *sample_weights,
                           SubTreeCache *subtree_cache) {
 
-  std::vector<float> y_pred((uint64_t)n_rows * (uint64_t)n_progs);
-  execute(d_progs, n_rows, n_progs, data, y_pred.data(), subtree_cache);
-
-  // Compute error
-  compute_metric(n_rows, n_progs, y, y_pred.data(), sample_weights, score,
-                 params);
+  std::vector<float> y_pred((uint64_t)n_rows);
+  execute_kernel_and_score(d_progs, data, y_pred.data(),
+                           static_cast<uint64_t>(n_rows),
+                           static_cast<uint64_t>(n_progs), params.metric, y,
+                           sample_weights, score, subtree_cache);
 }
 
 void set_fitness(program &h_prog, const param &params, const int n_rows,
